@@ -904,26 +904,19 @@
   <section class="section" id="sec-videos">
     <h2 class="section-title">表演影片</h2>
     <div class="video-edit-bar">
-      <span style="font-size:12px; color:var(--text-muted);" id="video-count">共 0 支影片</span>
-      <button class="btn-add" id="btn-add-video" onclick="toggleVideoForm()">＋ 新增影片</button>
-    </div>
-    <div id="video-form-wrap">
-      <div class="video-form open" id="video-form" style="display:none;">
-        <p style="font-size:12px; font-weight:500; color:var(--green-600); margin-bottom:8px;">新增 YouTube 影片</p>
-        <div class="form-row">
-          <input type="text" id="vf-title" placeholder="影片標題（例：2024 跨年演唱會）">
-          <input type="text" id="vf-url" placeholder="YouTube 網址或影片 ID">
-        </div>
-        <div class="form-actions" style="margin-top:8px;">
-          <button class="btn-save" onclick="addVideo()">✓ 加入</button>
-          <button class="btn-cancel" onclick="toggleVideoForm()">取消</button>
-        </div>
+      <span style="font-size:12px; color:var(--text-muted);" id="video-count">載入中...</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="playlist-select" onchange="loadPlaylist(this.value)" style="font-size:12px; padding:5px 8px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:white; color:var(--text-primary); font-family:'Noto Sans TC',sans-serif; cursor:pointer;">
+        </select>
+        <button class="btn-add" onclick="addPlaylistPrompt()">＋ 新增清單</button>
       </div>
     </div>
-    <div class="empty-state" id="video-empty">還沒有影片，點右上角「＋ 新增影片」加入你最喜歡的表演！</div>
+    <div id="yt-loading" style="text-align:center; padding:2rem; color:var(--text-muted); font-size:13px;">🍏 載入影片中...</div>
     <div class="video-grid" id="video-grid"></div>
-  </section>
-
+    <div class="empty-state" id="video-empty" style="display:none;">這個播放清單沒有影片</div>
+    <div id="yt-load-more" style="text-align:center; margin-top:1rem; display:none;">
+      <button class="btn-outline" onclick="loadMoreVideos()">顯示更多影片</button>
+    </div>
   </section>
   </div><!-- /page-videos -->
 
@@ -1085,44 +1078,104 @@ function scrollTo(id) {
   document.getElementById(id).scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ── VIDEOS
-let videos = [];
-try { const _v = localStorage.getItem(KEYS.videos); if (_v) videos = JSON.parse(_v); } catch(e) { videos = []; }
+// ── YOUTUBE API
+const YT_API_KEY = "AIzaSyApzBBzly5Oa-UORCdFteAWe0_6X38B94c";
+let playlists = [];
+let currentPlaylistId = null;
+let nextPageToken = null;
+let allVideos = [];
 
-function saveVideos() { try { localStorage.setItem(KEYS.videos, JSON.stringify(videos)); } catch(e) {} }
+// Load saved playlists from storage, pre-load default
+try {
+  const saved = localStorage.getItem('yx_playlists');
+  playlists = saved ? JSON.parse(saved) : [];
+} catch(e) { playlists = []; }
 
-function getYTId(input) {
-  input = input.trim();
-  const patterns = [
-    /youtu\.be\/([A-Za-z0-9_-]{11})/,
-    /[?&]v=([A-Za-z0-9_-]{11})/,
-    /embed\/([A-Za-z0-9_-]{11})/,
-    /^([A-Za-z0-9_-]{11})$/
-  ];
-  for (const p of patterns) {
-    const m = input.match(p);
-    if (m) return m[1];
-  }
-  return null;
+// Always ensure default playlist exists
+if (!playlists.find(p => p.id === "PLI8-Q2wV_be-IGvGZjex_psTGWGNE8-hx")) {
+  playlists.unshift({ id: "PLI8-Q2wV_be-IGvGZjex_psTGWGNE8-hx", name: "鄭元昕影片" });
+  try { localStorage.setItem('yx_playlists', JSON.stringify(playlists)); } catch(e) {}
 }
 
-function renderVideos() {
-  const grid = document.getElementById('video-grid');
-  const empty = document.getElementById('video-empty');
-  document.getElementById('video-count').textContent = '共 ' + videos.length + ' 支影片';
-  grid.innerHTML = '';
-  if (videos.length === 0) {
-    empty.style.display = '';
-    return;
+function savePlaylists() {
+  try { localStorage.setItem('yx_playlists', JSON.stringify(playlists)); } catch(e) {}
+}
+
+function renderPlaylistSelect() {
+  const sel = document.getElementById('playlist-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  playlists.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+  if (currentPlaylistId) sel.value = currentPlaylistId;
+}
+
+async function loadPlaylist(playlistId, pageToken) {
+  currentPlaylistId = playlistId;
+  if (!pageToken) {
+    allVideos = [];
+    nextPageToken = null;
+    document.getElementById('video-grid').innerHTML = '';
+    document.getElementById('yt-loading').style.display = '';
+    document.getElementById('video-empty').style.display = 'none';
+    document.getElementById('yt-load-more').style.display = 'none';
   }
-  empty.style.display = 'none';
-  videos.forEach((v, i) => {
+
+  let url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=12&playlistId=${playlistId}&key=${YT_API_KEY}`;
+  if (pageToken) url += `&pageToken=${pageToken}`;
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.error) {
+      document.getElementById('yt-loading').style.display = 'none';
+      document.getElementById('video-count').textContent = '載入失敗：' + data.error.message;
+      return;
+    }
+
+    nextPageToken = data.nextPageToken || null;
+    const items = data.items || [];
+    const total = data.pageInfo?.totalResults || 0;
+
+    items.forEach(item => {
+      const s = item.snippet;
+      if (s.resourceId?.kind === 'youtube#video') {
+        allVideos.push({ id: s.resourceId.videoId, title: s.title, thumb: s.thumbnails?.medium?.url || '' });
+      }
+    });
+
+    document.getElementById('video-count').textContent = '共 ' + total + ' 支影片';
+    document.getElementById('yt-loading').style.display = 'none';
+
+    if (allVideos.length === 0) {
+      document.getElementById('video-empty').style.display = '';
+    } else {
+      renderVideoGrid();
+    }
+
+    document.getElementById('yt-load-more').style.display = nextPageToken ? '' : 'none';
+
+  } catch(e) {
+    document.getElementById('yt-loading').style.display = 'none';
+    document.getElementById('video-count').textContent = '網路錯誤，請重新整理';
+  }
+}
+
+function renderVideoGrid() {
+  const grid = document.getElementById('video-grid');
+  grid.innerHTML = '';
+  allVideos.forEach((v, i) => {
     const card = document.createElement('div');
     card.className = 'video-card';
     card.innerHTML = `
-      <div class="video-thumb-wrap" onclick="playVideo(${i})" style="cursor:pointer;" title="點擊前往 YouTube 觀看">
-        <img class="thumb-img" src="https://img.youtube.com/vi/${v.id}/mqdefault.jpg" alt="${v.title}" onerror="this.style.background='var(--green-100)'">
-        <div class="thumb-overlay" style="opacity:1; background:rgba(15,42,20,0.18);">
+      <div class="video-thumb-wrap" onclick="playVideo(${i})" style="cursor:pointer;" title="${v.title}">
+        <img class="thumb-img" src="${v.thumb}" alt="${v.title}" loading="lazy" onerror="this.style.background='var(--green-100)'">
+        <div class="thumb-overlay">
           <button class="play-btn" aria-label="播放 ${v.title}" tabindex="-1">
             <svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>
           </button>
@@ -1130,14 +1183,36 @@ function renderVideos() {
       </div>
       <div class="video-info">
         <span class="video-title-text" title="${v.title}">${v.title}</span>
-        <button class="btn-del" onclick="event.stopPropagation();deleteVideo(${i})" aria-label="刪除">✕</button>
       </div>`;
     grid.appendChild(card);
   });
 }
 
+function loadMoreVideos() {
+  if (nextPageToken && currentPlaylistId) {
+    loadPlaylist(currentPlaylistId, nextPageToken);
+  }
+}
+
+function addPlaylistPrompt() {
+  const name = prompt('播放清單名稱：');
+  if (!name) return;
+  const url = prompt('播放清單網址或 ID（PLxxxxxxxx）：');
+  if (!url) return;
+  const match = url.match(/list=([A-Za-z0-9_-]+)/);
+  const id = match ? match[1] : url.trim();
+  if (!id.startsWith('PL') && !id.startsWith('FL') && !id.startsWith('RD')) {
+    alert('格式不正確，請貼上完整播放清單網址或 PL 開頭的 ID');
+    return;
+  }
+  playlists.push({ id, name });
+  savePlaylists();
+  renderPlaylistSelect();
+  loadPlaylist(id);
+}
+
 function playVideo(i) {
-  const v = videos[i];
+  const v = allVideos[i];
   const lb = document.getElementById('video-lightbox');
   const frame = document.getElementById('video-lightbox-frame');
   const title = document.getElementById('video-lightbox-title');
@@ -1145,42 +1220,6 @@ function playVideo(i) {
   title.textContent = v.title;
   lb.classList.add('open');
   document.body.style.overflow = 'hidden';
-}
-
-function closeVideoLightbox(e) {
-  if (e && e.target !== document.getElementById('video-lightbox') && !e.target.classList.contains('lightbox-close')) return;
-  const lb = document.getElementById('video-lightbox');
-  lb.classList.remove('open');
-  document.getElementById('video-lightbox-frame').src = '';
-  document.body.style.overflow = '';
-}
-
-function toggleVideoForm() {
-  const f = document.getElementById('video-form');
-  const opening = f.style.display === 'none' || f.style.display === '';
-  f.style.display = opening ? 'block' : 'none';
-  if (opening) setTimeout(() => { const t = document.getElementById('vf-title'); if(t) t.focus(); }, 50);
-}
-
-function addVideo() {
-  const title = document.getElementById('vf-title').value.trim();
-  const url = document.getElementById('vf-url').value.trim();
-  if (!title) { alert('請填寫影片標題'); return; }
-  const id = getYTId(url);
-  if (!id) { alert('請輸入有效的 YouTube 網址或影片 ID'); return; }
-  videos.push({ id, title });
-  saveVideos();
-  renderVideos();
-  document.getElementById('vf-title').value = '';
-  document.getElementById('vf-url').value = '';
-  toggleVideoForm();
-}
-
-function deleteVideo(i) {
-  if (!confirm('確定要刪除這支影片嗎？')) return;
-  videos.splice(i, 1);
-  saveVideos();
-  renderVideos();
 }
 
 // ── PHOTOS
@@ -1408,7 +1447,7 @@ function loadMoreMessages() {
 }
 
 // ── INIT
-renderVideos();
+// YouTube API init - called when videos page is first shown
 renderPhotos();
 renderMessages();
 showPage('home');
